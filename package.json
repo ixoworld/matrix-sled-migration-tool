@@ -1,0 +1,48 @@
+{
+  "name": "@ixo/matrix-sled-migration",
+  "version": "1.0.0",
+  "author": "Ixo Foundation",
+  "license": "Apache-2.0",
+  "description": "CLI tool to migrate Matrix bot encryption keys from Sled to SQLite via server-side key backup",
+  "main": "lib/index.js",
+  "bin": {
+    "matrix-sled-migration": "./lib/index.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ixoworld/matrix-sled-migration-tool"
+  },
+  "keywords": [
+    "matrix",
+    "encryption",
+    "migration",
+    "sled",
+    "sqlite",
+    "e2ee",
+    "backup"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "npm run build",
+    "start": "node lib/index.js",
+    "dev": "npx ts-node src/index.ts"
+  },
+  "files": [
+    "lib/**/*",
+    "scripts/**/*",
+    "rust-key-extractor/**/*",
+    "README.md"
+  ],
+  "dependencies": {
+    "@ixo/matrix-sdk-crypto-nodejs": "^0.4.2",
+    "bs58": "^5.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.3"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

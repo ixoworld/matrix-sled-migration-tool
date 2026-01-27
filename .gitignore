@@ -1,0 +1,39 @@
+# Dependencies
+node_modules/
+
+# Build output
+lib/
+
+# Rust build artifacts
+rust-key-extractor/target/
+
+# Sensitive migration files
+extracted-keys.json
+recovery-key.txt
+backup-private-key.bin
+backup-public-key.txt
+migration-state.json
+migration-backup-*/
+
+# Environment files
+.env
+.env.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+test-storage
+storage

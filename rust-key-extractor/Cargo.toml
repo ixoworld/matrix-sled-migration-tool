@@ -1,0 +1,39 @@
+[package]
+name = "sled-key-extractor"
+version = "0.1.0"
+edition = "2021"
+description = "Extract Megolm session keys from Sled crypto store for Matrix bot migration"
+license = "Apache-2.0"
+
+[dependencies]
+# Match the EXACT versions used by @matrix-org/matrix-sdk-crypto-nodejs 0.1.0-beta.6
+# Using the exact commit that 0.1.0-beta.6 was built from
+matrix-sdk-sled = { git = "https://github.com/matrix-org/matrix-rust-sdk", rev = "c312dbb707946419041c0d26aab6faf562ee77a3", features = ["crypto-store"] }
+matrix-sdk-crypto = { git = "https://github.com/matrix-org/matrix-rust-sdk", rev = "c312dbb707946419041c0d26aab6faf562ee77a3" }
+vodozemac = "0.4"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# CLI argument parsing
+clap = { version = "4", features = ["derive"] }
+
+# Error handling
+anyhow = "1"
+thiserror = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Direct sled access for debugging
+sled = "0.34"
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
