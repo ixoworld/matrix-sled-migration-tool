@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [main]
 
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -31,11 +35,15 @@ jobs:
           test -f lib/index.js || (echo "Build failed: lib/index.js not found" && exit 1)
           echo "Build successful"
 
-  publish:
+  publish-npm:
     needs: build
     runs-on: ubuntu-latest
     # Only publish on push to main (not PRs)
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      should_publish: ${{ steps.version.outputs.should_publish }}
 
     steps:
       - name: Checkout
@@ -87,3 +95,47 @@ jobs:
       - name: Skip publish (version exists)
         if: steps.version.outputs.should_publish == 'false'
         run: echo "Skipping publish - version ${{ steps.version.outputs.version }} already exists on npm"
+
+  publish-docker:
+    needs: publish-npm
+    runs-on: ubuntu-latest
+    # Only build Docker image if npm publish ran (new version)
+    if: needs.publish-npm.outputs.should_publish == 'true'
+
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GHCR_TOKEN }}
+
+      - name: Extract metadata for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}},value=v${{ needs.publish-npm.outputs.version }}
+            type=semver,pattern={{major}}.{{minor}},value=v${{ needs.publish-npm.outputs.version }}
+            type=raw,value=latest
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

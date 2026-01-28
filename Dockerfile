@@ -70,7 +70,7 @@ ENV MIGRATION_DIR=/migration
 ENV NODE_ENV=production
 
 # Add labels
-LABEL org.opencontainers.image.source="https://github.com/ixofoundation/sled-migration-tool"
+LABEL org.opencontainers.image.source="https://github.com/ixoworld/matrix-sled-migration"
 LABEL org.opencontainers.image.description="Tool to migrate Matrix bot Sled crypto stores to SQLite"
 LABEL org.opencontainers.image.licenses="Apache-2.0"
 
