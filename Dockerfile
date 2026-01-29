@@ -1,5 +1,5 @@
 # Stage 1: Build the Rust key extractor
-FROM rust:1.75-slim AS rust-builder
+FROM rust:1.85-slim AS rust-builder
 
 WORKDIR /app
 
@@ -16,7 +16,7 @@ COPY rust-key-extractor/ ./rust-key-extractor/
 RUN cd rust-key-extractor && cargo build --release
 
 # Stage 2: Build the Node.js application
-FROM node:20-slim AS node-builder
+FROM node:22-slim AS node-builder
 
 WORKDIR /app
 
@@ -36,7 +36,7 @@ COPY src/ ./src/
 RUN npm run build
 
 # Stage 3: Production image
-FROM node:20-slim
+FROM node:22-slim
 
 WORKDIR /app
 
