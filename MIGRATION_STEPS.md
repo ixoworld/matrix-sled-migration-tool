@@ -129,6 +129,52 @@ STORAGE_PATH=/path/to/bot/storage sled-migration-tool extract
 **Output:**
 - `extracted-keys.json` - Contains all encryption keys (keep secure!)
 
+#### Fault-Tolerant Extraction (for corrupted databases)
+
+If extraction fails with errors like "leading sigil is incorrect or missing" or other deserialization errors, the database may have some corrupted entries. Use the `--skip-errors` flag to extract as many keys as possible while skipping corrupted ones:
+
+```bash
+# Run the key extractor directly with fault-tolerant mode
+cd rust-key-extractor
+./target/release/sled-key-extractor \
+  --sled-path $CRYPTO_STORE_PATH/matrix-sdk-crypto \
+  --output /path/to/extracted-keys.json \
+  --skip-errors \
+  --failed-output /path/to/failed-sessions.json \
+  --verbose
+```
+
+**Fault-tolerant mode:**
+- Iterates through each session individually instead of loading all at once
+- Skips corrupted entries and continues with valid ones
+- Logs progress every 1000 sessions
+- Outputs details of failed sessions to a separate file for debugging
+
+**When to use:**
+- When standard extraction fails with deserialization errors
+- For very large databases (80GB+) that may have disk corruption
+- When recovering partial data is better than no data
+
+**Output in fault-tolerant mode:**
+- `extracted-keys.json` - Successfully extracted keys
+- `failed-sessions.json` - Details of sessions that couldn't be extracted (index, key hex, error message)
+
+**Example output:**
+```
+Mode: FAULT-TOLERANT (will skip corrupted entries)
+Found existing store cipher, importing with passphrase
+Found 15847 entries in inbound group sessions tree
+Progress: 1000 sessions exported...
+...
+Session 7234: Failed to deserialize - leading sigil incorrect at column 888
+...
+Extraction complete: 15802 succeeded, 45 failed out of 15847 total
+Failed sessions written to: /path/to/failed-sessions.json
+Keys successfully exported to: /path/to/extracted-keys.json
+Total keys exported: 15802
+Total keys failed: 45
+```
+
 ### Step 3: Enable Server Backup
 
 Create a server-side key backup and generate the recovery key.
@@ -483,6 +529,38 @@ source ~/.cargo/env
 - The crypto store may be empty (new bot with no encryption history)
 - The Sled store may be corrupted - try restoring from backup
 - Check the output for specific error messages
+
+### "leading sigil is incorrect or missing" or "Failed to retrieve inbound group sessions"
+
+This error indicates corrupted session data in the Sled database. The "sigil" refers to Matrix identifier prefixes (e.g., `!` for room IDs, `@` for user IDs). When this error occurs, one or more session entries have invalid data.
+
+**Solution: Use fault-tolerant extraction mode**
+
+```bash
+cd rust-key-extractor
+./target/release/sled-key-extractor \
+  --sled-path $CRYPTO_STORE_PATH/matrix-sdk-crypto \
+  --output /migration/extracted-keys.json \
+  --skip-errors \
+  --failed-output /migration/failed-sessions.json \
+  --verbose
+```
+
+This will:
+- Skip corrupted entries instead of failing completely
+- Extract all valid sessions (often 99%+ of the data)
+- Log which sessions failed and why
+- Save failed session details to a separate file
+
+**Common causes:**
+- Disk corruption or incomplete writes
+- Version mismatches between SDK versions
+- Very large databases (80GB+) with accumulated corruption over time
+
+**After extraction:**
+- Check `failed-sessions.json` to see how many sessions couldn't be recovered
+- Most failed sessions are for old rooms you may no longer need
+- Proceed with uploading the successfully extracted keys
 
 ### "Authentication failed"
 

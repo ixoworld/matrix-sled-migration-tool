@@ -92,6 +92,22 @@ npx @ixo/matrix-sled-migration extract
 
 This compiles a Rust binary and extracts keys to `extracted-keys.json`.
 
+##### Fault-Tolerant Extraction (for corrupted databases)
+
+If extraction fails with deserialization errors (e.g., "leading sigil is incorrect"), use the Rust extractor directly with fault-tolerant mode:
+
+```bash
+cd rust-key-extractor
+./target/release/sled-key-extractor \
+  --sled-path $STORAGE_PATH/encrypted/matrix-sdk-crypto \
+  --output extracted-keys.json \
+  --skip-errors \
+  --failed-output failed-sessions.json \
+  --verbose
+```
+
+This mode skips corrupted entries and extracts as many valid keys as possible.
+
 #### 3. Enable Server Backup
 
 Create a server-side key backup and generate a recovery key.
@@ -234,6 +250,23 @@ kubectl run migration \
 # Then deploy updated bot with SQLite support
 ```
 
+## Rust Key Extractor CLI
+
+The `rust-key-extractor` binary can be run directly for more control:
+
+```bash
+./target/release/sled-key-extractor [OPTIONS] --sled-path <PATH> --output <FILE>
+```
+
+| Option | Description |
+|--------|-------------|
+| `-s, --sled-path <PATH>` | Path to the Sled crypto store directory |
+| `-o, --output <FILE>` | Output file for extracted keys JSON |
+| `-p, --passphrase <PASS>` | Store passphrase (default: empty string) |
+| `-v, --verbose` | Enable verbose output |
+| `--skip-errors` | **Fault-tolerant mode** - skip corrupted entries |
+| `--failed-output <FILE>` | Output file for failed session details |
+
 ## Files Generated
 
 | File | Description |
@@ -242,6 +275,7 @@ kubectl run migration \
 | `backup-private-key.bin` | Private key for backup encryption |
 | `backup-public-key.txt` | Public key for reference |
 | `extracted-keys.json` | Keys extracted from Sled |
+| `failed-sessions.json` | Failed sessions (when using `--skip-errors`) |
 | `migration-state.json` | Migration progress tracking |
 
 ## Security
@@ -285,6 +319,21 @@ source ~/.cargo/env
 
 - The crypto store may be empty (new bot with no E2EE history)
 - The Sled store may be corrupted
+
+### "leading sigil is incorrect or missing" / "Failed to retrieve inbound group sessions"
+
+The database has corrupted session entries. Use fault-tolerant extraction:
+
+```bash
+cd rust-key-extractor
+./target/release/sled-key-extractor \
+  --sled-path $STORAGE_PATH/encrypted/matrix-sdk-crypto \
+  --output extracted-keys.json \
+  --skip-errors \
+  --verbose
+```
+
+This skips corrupted entries and extracts all valid keys. See `MIGRATION_STEPS.md` for details.
 
 ### "Authentication failed"
 

@@ -6,13 +6,17 @@
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use matrix_sdk_crypto::olm::ExportedRoomKey;
+use matrix_sdk_crypto::olm::{ExportedRoomKey, InboundGroupSession, PickledInboundGroupSession};
 use matrix_sdk_crypto::store::CryptoStore;
 use matrix_sdk_sled::SledCryptoStore;
+use matrix_sdk_store_encryption::StoreCipher;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tracing::{info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
+
+/// Tree name for inbound group sessions in matrix-sdk-sled
+const INBOUND_GROUP_TABLE_NAME: &str = "crypto-store-inbound-group-sessions";
 
 /// Extracted key data in a format suitable for Matrix backup upload
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,10 +44,32 @@ struct ExtractionOutput {
     version: u32,
     /// Total number of keys extracted
     total_keys: usize,
+    /// Number of failed extractions (if skip_errors enabled)
+    failed_keys: usize,
     /// Extracted keys organized by room
     keys_by_room: std::collections::HashMap<String, Vec<ExportedKeyData>>,
     /// Flat list of all keys
     all_keys: Vec<ExportedKeyData>,
+}
+
+/// Information about a failed session extraction
+#[derive(Debug, Serialize, Deserialize)]
+struct FailedSession {
+    /// Index in the iteration
+    index: usize,
+    /// Raw key bytes as hex (for debugging)
+    key_hex: String,
+    /// Error message
+    error: String,
+}
+
+/// Output for failed sessions
+#[derive(Debug, Serialize, Deserialize)]
+struct FailedSessionsOutput {
+    /// Total number of failures
+    total_failed: usize,
+    /// Details of each failed session
+    sessions: Vec<FailedSession>,
 }
 
 /// CLI arguments for the key extractor
@@ -65,6 +91,14 @@ struct Args {
     /// Enable verbose output
     #[arg(short, long, default_value = "false")]
     verbose: bool,
+
+    /// Skip corrupted entries instead of failing (enables fault-tolerant mode)
+    #[arg(long, default_value = "false")]
+    skip_errors: bool,
+
+    /// Output file for failed session details (only used with --skip-errors)
+    #[arg(long)]
+    failed_output: Option<PathBuf>,
 }
 
 /// Convert an ExportedRoomKey to our serializable format
@@ -88,8 +122,139 @@ fn convert_exported_key(key: &ExportedRoomKey) -> ExportedKeyData {
     }
 }
 
-/// Extract all inbound group session keys from the Sled store
-async fn extract_keys(sled_path: &PathBuf, passphrase: Option<&str>) -> Result<Vec<ExportedRoomKey>> {
+/// Deserialize a value, optionally decrypting it first
+fn deserialize_value<T: serde::de::DeserializeOwned>(
+    data: &[u8],
+    store_cipher: Option<&StoreCipher>,
+) -> Result<T> {
+    if let Some(cipher) = store_cipher {
+        cipher
+            .decrypt_value(data)
+            .context("Failed to decrypt value")
+    } else {
+        serde_json::from_slice(data).context("Failed to deserialize JSON")
+    }
+}
+
+/// Load the store cipher from the database if it exists
+fn load_store_cipher(db: &sled::Db, passphrase: &str) -> Result<Option<StoreCipher>> {
+    // The store cipher key is stored with a specific encoding
+    let cipher_key = "store_cipher".as_bytes();
+
+    if let Some(encrypted_cipher) = db.get(cipher_key)? {
+        info!("Found existing store cipher, importing with passphrase");
+        let cipher = StoreCipher::import(passphrase, &encrypted_cipher)
+            .context("Failed to import store cipher - wrong passphrase?")?;
+        Ok(Some(cipher))
+    } else {
+        info!("No store cipher found - data is not encrypted");
+        Ok(None)
+    }
+}
+
+/// Extract keys using fault-tolerant direct sled access
+async fn extract_keys_fault_tolerant(
+    sled_path: &PathBuf,
+    passphrase: Option<&str>,
+) -> Result<(Vec<ExportedRoomKey>, Vec<FailedSession>)> {
+    info!("Opening Sled database in fault-tolerant mode");
+
+    let effective_passphrase = passphrase.unwrap_or("");
+    info!("Using passphrase: '{}'", if effective_passphrase.is_empty() { "<empty string>" } else { "<provided>" });
+
+    // Open raw sled database
+    let db = sled::Config::new()
+        .path(sled_path)
+        .open()
+        .context("Failed to open sled database")?;
+
+    // Load store cipher if present
+    let store_cipher = load_store_cipher(&db, effective_passphrase)?;
+    let store_cipher_ref = store_cipher.as_ref();
+
+    // Open the inbound group sessions tree
+    let sessions_tree = db
+        .open_tree(INBOUND_GROUP_TABLE_NAME)
+        .context("Failed to open inbound group sessions tree")?;
+
+    let total_entries = sessions_tree.len();
+    info!("Found {} entries in inbound group sessions tree", total_entries);
+
+    let mut exported_keys: Vec<ExportedRoomKey> = Vec::new();
+    let mut failed_sessions: Vec<FailedSession> = Vec::new();
+    let mut success_count = 0;
+    let mut fail_count = 0;
+
+    // Iterate through all entries
+    for (index, item) in sessions_tree.iter().enumerate() {
+        match item {
+            Ok((key, value)) => {
+                // Try to deserialize the pickled session
+                let pickle_result: Result<PickledInboundGroupSession> =
+                    deserialize_value(&value, store_cipher_ref);
+
+                match pickle_result {
+                    Ok(pickle) => {
+                        // Try to reconstruct the session from pickle
+                        match InboundGroupSession::from_pickle(pickle) {
+                            Ok(session) => {
+                                let exported = session.export().await;
+                                exported_keys.push(exported);
+                                success_count += 1;
+
+                                if success_count % 1000 == 0 {
+                                    info!("Progress: {} sessions exported...", success_count);
+                                }
+                            }
+                            Err(e) => {
+                                let key_hex = hex::encode(&key);
+                                warn!(
+                                    "Session {}: Failed to reconstruct from pickle - {}",
+                                    index, e
+                                );
+                                failed_sessions.push(FailedSession {
+                                    index,
+                                    key_hex,
+                                    error: format!("Pickle reconstruction failed: {}", e),
+                                });
+                                fail_count += 1;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let key_hex = hex::encode(&key);
+                        warn!("Session {}: Failed to deserialize - {}", index, e);
+                        failed_sessions.push(FailedSession {
+                            index,
+                            key_hex,
+                            error: format!("Deserialization failed: {}", e),
+                        });
+                        fail_count += 1;
+                    }
+                }
+            }
+            Err(e) => {
+                warn!("Session {}: Failed to read from sled - {}", index, e);
+                failed_sessions.push(FailedSession {
+                    index,
+                    key_hex: String::from("<read error>"),
+                    error: format!("Sled read error: {}", e),
+                });
+                fail_count += 1;
+            }
+        }
+    }
+
+    info!(
+        "Extraction complete: {} succeeded, {} failed out of {} total",
+        success_count, fail_count, total_entries
+    );
+
+    Ok((exported_keys, failed_sessions))
+}
+
+/// Extract all inbound group session keys from the Sled store (original strict mode)
+async fn extract_keys_strict(sled_path: &PathBuf, passphrase: Option<&str>) -> Result<Vec<ExportedRoomKey>> {
     info!("Opening Sled crypto store at: {:?}", sled_path);
 
     // Open the Sled store
@@ -175,7 +340,7 @@ async fn extract_keys(sled_path: &PathBuf, passphrase: Option<&str>) -> Result<V
 }
 
 /// Organize keys by room and create the output structure
-fn organize_keys(keys: Vec<ExportedRoomKey>) -> ExtractionOutput {
+fn organize_keys(keys: Vec<ExportedRoomKey>, failed_count: usize) -> ExtractionOutput {
     let mut keys_by_room: std::collections::HashMap<String, Vec<ExportedKeyData>> =
         std::collections::HashMap::new();
     let mut all_keys = Vec::new();
@@ -195,6 +360,7 @@ fn organize_keys(keys: Vec<ExportedRoomKey>) -> ExtractionOutput {
     ExtractionOutput {
         version: 1,
         total_keys: all_keys.len(),
+        failed_keys: failed_count,
         keys_by_room,
         all_keys,
     }
@@ -225,6 +391,11 @@ async fn main() -> Result<()> {
     info!("Sled Key Extractor v{}", env!("CARGO_PKG_VERSION"));
     info!("Sled path: {:?}", args.sled_path);
     info!("Output path: {:?}", args.output);
+    if args.skip_errors {
+        info!("Mode: FAULT-TOLERANT (will skip corrupted entries)");
+    } else {
+        info!("Mode: STRICT (will fail on any error)");
+    }
 
     // Verify the Sled path exists
     if !args.sled_path.exists() {
@@ -232,14 +403,48 @@ async fn main() -> Result<()> {
     }
 
     // Extract the keys
-    let keys = extract_keys(&args.sled_path, args.passphrase.as_deref()).await?;
+    let (keys, failed_count) = if args.skip_errors {
+        let (keys, failed_sessions) = extract_keys_fault_tolerant(
+            &args.sled_path,
+            args.passphrase.as_deref(),
+        ).await?;
+
+        let failed_count = failed_sessions.len();
+
+        // Write failed sessions to file if requested
+        if !failed_sessions.is_empty() {
+            let failed_output_path = args.failed_output.unwrap_or_else(|| {
+                let mut path = args.output.clone();
+                path.set_file_name("failed-sessions.json");
+                path
+            });
+
+            let failed_output = FailedSessionsOutput {
+                total_failed: failed_count,
+                sessions: failed_sessions,
+            };
+
+            let failed_json = serde_json::to_string_pretty(&failed_output)
+                .context("Failed to serialize failed sessions")?;
+
+            std::fs::write(&failed_output_path, &failed_json)
+                .context("Failed to write failed sessions file")?;
+
+            warn!("Failed sessions written to: {:?}", failed_output_path);
+        }
+
+        (keys, failed_count)
+    } else {
+        let keys = extract_keys_strict(&args.sled_path, args.passphrase.as_deref()).await?;
+        (keys, 0)
+    };
 
     if keys.is_empty() {
         warn!("No keys were extracted! The store may be empty or corrupted.");
     }
 
     // Organize and serialize
-    let output = organize_keys(keys);
+    let output = organize_keys(keys, failed_count);
 
     // Write to output file
     let json = serde_json::to_string_pretty(&output)
@@ -250,6 +455,9 @@ async fn main() -> Result<()> {
 
     info!("Keys successfully exported to: {:?}", args.output);
     info!("Total keys exported: {}", output.total_keys);
+    if output.failed_keys > 0 {
+        warn!("Total keys failed: {}", output.failed_keys);
+    }
     info!("Rooms with keys: {}", output.keys_by_room.len());
 
     // Print summary by room
@@ -272,6 +480,7 @@ mod tests {
         let output = ExtractionOutput {
             version: 1,
             total_keys: 0,
+            failed_keys: 0,
             keys_by_room: std::collections::HashMap::new(),
             all_keys: Vec::new(),
         };
@@ -280,5 +489,6 @@ mod tests {
         let parsed: ExtractionOutput = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.version, 1);
         assert_eq!(parsed.total_keys, 0);
+        assert_eq!(parsed.failed_keys, 0);
     }
 }
