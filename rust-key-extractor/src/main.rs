@@ -16,7 +16,12 @@ use tracing::{info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
 /// Tree name for inbound group sessions in matrix-sdk-sled
-const INBOUND_GROUP_TABLE_NAME: &str = "crypto-store-inbound-group-sessions";
+/// Note: The constant "crypto-store-inbound-group-sessions" is used for key encoding,
+/// but the actual sled tree name is just "inbound_group_sessions"
+const INBOUND_GROUP_SESSIONS_TREE: &str = "inbound_group_sessions";
+
+/// Separator byte used by matrix-sdk-sled's EncodeKey trait
+const ENCODE_SEPARATOR: u8 = 0xff;
 
 /// Extracted key data in a format suitable for Matrix backup upload
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -136,12 +141,19 @@ fn deserialize_value<T: serde::de::DeserializeOwned>(
     }
 }
 
+/// Encode a key the same way matrix-sdk-sled does (append ENCODE_SEPARATOR)
+fn encode_key(key: &str) -> Vec<u8> {
+    let mut encoded = key.as_bytes().to_vec();
+    encoded.push(ENCODE_SEPARATOR);
+    encoded
+}
+
 /// Load the store cipher from the database if it exists
 fn load_store_cipher(db: &sled::Db, passphrase: &str) -> Result<Option<StoreCipher>> {
-    // The store cipher key is stored with a specific encoding
-    let cipher_key = "store_cipher".as_bytes();
+    // The store cipher key is stored with the EncodeKey encoding (key + 0xff separator)
+    let cipher_key = encode_key("store_cipher");
 
-    if let Some(encrypted_cipher) = db.get(cipher_key)? {
+    if let Some(encrypted_cipher) = db.get(&cipher_key)? {
         info!("Found existing store cipher, importing with passphrase");
         let cipher = StoreCipher::import(passphrase, &encrypted_cipher)
             .context("Failed to import store cipher - wrong passphrase?")?;
@@ -174,7 +186,7 @@ async fn extract_keys_fault_tolerant(
 
     // Open the inbound group sessions tree
     let sessions_tree = db
-        .open_tree(INBOUND_GROUP_TABLE_NAME)
+        .open_tree(INBOUND_GROUP_SESSIONS_TREE)
         .context("Failed to open inbound group sessions tree")?;
 
     let total_entries = sessions_tree.len();

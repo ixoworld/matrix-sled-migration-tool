@@ -1,6 +1,6 @@
 {
   "name": "@ixo/matrix-sled-migration",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "author": "Ixo Foundation",
   "license": "Apache-2.0",
   "description": "CLI tool to migrate Matrix bot encryption keys from Sled to SQLite via server-side key backup",
