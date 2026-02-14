@@ -296,6 +296,73 @@ This runs: `enable` -> `upload` -> `verify`
 
 **Note**: Backup, extract, and delete must still be run separately.
 
+## Oracle Migration (Existing SSSS Backup)
+
+Oracles that already have SSSS (Secret Storage) set up via `MATRIX_RECOVERY_PHRASE` and an existing server-side key backup (created during initial cross-signing setup) use a different flow. Instead of creating a new backup with `enable`, the existing backup key is extracted from SSSS.
+
+### When to Use Oracle Migration
+
+Use the oracle-specific commands when:
+- The oracle has `MATRIX_RECOVERY_PHRASE` configured
+- The oracle has already completed initial setup (cross-signing + key backup created)
+- SSSS account data exists on the server (`m.secret_storage.default_key`, `m.megolm_backup.v1`)
+
+### Step A: Extract Backup Key from SSSS
+
+Instead of `enable` (Step 3), extract the existing backup key from SSSS:
+
+```bash
+HOMESERVER_URL=https://matrix.example.com \
+ACCESS_TOKEN=syt_xxx \
+STORAGE_PATH=/path/to/bot/storage \
+RECOVERY_PHRASE="your_recovery_phrase" \
+sled-migration-tool extract-backup-key
+```
+
+**What it does:**
+1. Fetches `m.secret_storage.default_key` to get the SSSS key ID
+2. Fetches `m.secret_storage.key.<keyId>` to get salt, iterations, and MAC
+3. Derives the SSSS master key from the recovery phrase using PBKDF2-SHA512
+4. Verifies the derived key against the stored MAC
+5. Fetches `m.megolm_backup.v1` (the encrypted backup key from SSSS)
+6. Decrypts using AES-CTR + HMAC-SHA256 (HKDF-derived keys)
+7. Verifies the decrypted key matches the server backup's public key
+
+**Output:**
+- `recovery-key.txt` - Recovery key in Base58 format (same format as `enable`)
+- `backup-private-key.bin` - Raw key bytes
+- `backup-public-key.txt` - Public key for reference
+
+### Step B & C: Upload and Verify
+
+After extracting the backup key, run `upload` and `verify` as normal (Steps 4-5 above). The `upload` command works with existing server backups — it doesn't require the backup to have been created by the `enable` command.
+
+### Oracle Combined Command
+
+Run `extract-backup-key` -> `upload` -> `verify` in one command:
+
+```bash
+HOMESERVER_URL=https://matrix.example.com \
+ACCESS_TOKEN=syt_xxx \
+STORAGE_PATH=/path/to/bot/storage \
+RECOVERY_PHRASE="your_recovery_phrase" \
+sled-migration-tool oracle-all
+```
+
+### Oracle Post-Migration
+
+After uploading keys, the oracle migration differs from bot migration:
+
+1. **Clear old storage** — Remove the old sled crypto store and sync token
+2. **Deploy updated oracle** — The updated code uses SQLite and auto-extracts the backup key from SSSS on every startup
+3. **No manual recovery key needed** — The oracle derives it from `MATRIX_RECOVERY_PHRASE` automatically
+
+The updated oracle startup flow:
+1. Extracts backup key from SSSS using `MATRIX_RECOVERY_PHRASE`
+2. Passes the key to `matrix-bot-sdk` as `recoveryKey` config
+3. `matrix-bot-sdk` uses the key to automatically restore megolm sessions from server backup
+4. New crypto store uses SQLite (`encrypted-sqlite/` directory)
+
 ## Local Testing
 
 Before running the migration in production, test locally.
@@ -581,6 +648,25 @@ The tool will prompt whether to create a new backup version. Options:
 - Check if the device ID matches what's in `bot-sdk.json`
 - Try deleting the device manually via Element or another client
 
+### "No backup key found in SSSS"
+
+When running `extract-backup-key`:
+- SSSS may not be set up (oracle hasn't completed initial cross-signing setup)
+- The `m.megolm_backup.v1` secret may not be stored in SSSS
+- Run the oracle once with the current code to complete initial setup, then retry
+
+### "SSSS key verification failed: recovery phrase does not match"
+
+- The `RECOVERY_PHRASE` doesn't match the phrase used when SSSS was set up
+- Check that `RECOVERY_PHRASE` matches the oracle's `MATRIX_RECOVERY_PHRASE` env var
+- The passphrase is case-sensitive
+
+### "Extracted key does NOT match server backup"
+
+- The backup was recreated after SSSS was initially set up
+- The SSSS-stored backup key is stale
+- May need to use `enable` instead (creates a new backup)
+
 ### "Bot can't decrypt messages after migration"
 
 1. Check bot logs for specific error messages
@@ -605,6 +691,7 @@ The tool will prompt whether to create a new backup version. Options:
 | `MIGRATION_CONFIRM` | No | Device ID confirmation for non-interactive deletion |
 | `FORCE_NEW_BACKUP` | No | Skip prompt when existing backup found |
 | `FORCE_BACKUP` | No | Continue backup even if bot appears running |
+| `RECOVERY_PHRASE` | For oracle cmds | Oracle recovery phrase for SSSS extraction (`extract-backup-key`, `oracle-all`) |
 
 ## Files Generated
 

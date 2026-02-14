@@ -252,6 +252,29 @@ export async function deleteDevice(
 }
 
 /**
+ * Get account data for a user
+ */
+export async function getAccountData(
+    config: MatrixApiConfig,
+    userId: string,
+    type: string
+): Promise<any | null> {
+    try {
+        return await matrixRequest<any>(
+            config,
+            'GET',
+            `/_matrix/client/v3/user/${encodeURIComponent(userId)}/account_data/${encodeURIComponent(type)}`
+        );
+    } catch (e) {
+        const error = e as Error;
+        if (error.message.includes('404')) {
+            return null;
+        }
+        throw e;
+    }
+}
+
+/**
  * Start a user-interactive auth session for device deletion
  */
 export async function startDeviceDeletionAuth(

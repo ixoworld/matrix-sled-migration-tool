@@ -65,6 +65,7 @@ matrix-sled-migration <command>
 | `MIGRATION_PASSWORD` | Account password (non-interactive) | - |
 | `MIGRATION_CONFIRM` | Confirm device deletion (non-interactive) | - |
 | `FORCE_NEW_BACKUP` | Skip prompt when existing backup found | - |
+| `RECOVERY_PHRASE` | Oracle recovery phrase for SSSS extraction (`extract-backup-key`, `oracle-all`) | - |
 
 ## Commands
 
@@ -165,6 +166,41 @@ STORAGE_PATH=/app/storage \
 npx @ixo/matrix-sled-migration all
 ```
 
+### Oracle Migration (Existing SSSS Backup)
+
+Oracles that already have SSSS (Secret Storage) set up via `MATRIX_RECOVERY_PHRASE` and an existing server-side key backup don't need the `enable` step. Instead, the backup key is extracted from SSSS.
+
+#### Extract Backup Key from SSSS
+
+Extract the existing backup decryption key from Matrix Secret Storage using the oracle's recovery phrase.
+
+```bash
+HOMESERVER_URL=https://matrix.example.com \
+ACCESS_TOKEN=syt_xxx \
+STORAGE_PATH=/app/storage \
+RECOVERY_PHRASE="your_recovery_phrase" \
+npx @ixo/matrix-sled-migration extract-backup-key
+```
+
+**What it does:**
+- Fetches the SSSS key metadata from the server
+- Derives the SSSS master key from the recovery phrase (PBKDF2-SHA512)
+- Decrypts the backup key stored in `m.megolm_backup.v1` account data
+- Verifies the key matches the server backup's public key
+- Saves `recovery-key.txt`, `backup-private-key.bin`, `backup-public-key.txt`
+
+#### Oracle Automated Migration
+
+Run `extract-backup-key` -> `upload` -> `verify` in one command:
+
+```bash
+HOMESERVER_URL=https://matrix.example.com \
+ACCESS_TOKEN=syt_xxx \
+STORAGE_PATH=/app/storage \
+RECOVERY_PHRASE="your_recovery_phrase" \
+npx @ixo/matrix-sled-migration oracle-all
+```
+
 ### Generate Recovery Key Only
 
 For new deployments, generate a recovery key without migration:
@@ -210,6 +246,46 @@ npx @ixo/matrix-sled-migration generate-key
 │                                                                  │
 └─────────────────────────────────────────────────────────────────┘
 ```
+
+## Oracle Migration Workflow
+
+For oracles with SSSS already set up (via `MATRIX_RECOVERY_PHRASE`):
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                 ORACLE MIGRATION WORKFLOW                        │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  1. STOP YOUR ORACLE                                            │
+│     └── Ensure no processes are accessing the storage           │
+│                                                                  │
+│  2. BACKUP (optional)                                           │
+│     └── npx @ixo/matrix-sled-migration backup                   │
+│                                                                  │
+│  3. EXTRACT                                                     │
+│     └── npx @ixo/matrix-sled-migration extract                  │
+│     └── Requires: Rust toolchain                                │
+│     └── Output: extracted-keys.json                             │
+│                                                                  │
+│  4. EXTRACT BACKUP KEY + UPLOAD + VERIFY (or run "oracle-all")  │
+│     └── npx @ixo/matrix-sled-migration oracle-all               │
+│     └── Requires: RECOVERY_PHRASE env var                       │
+│     └── Uses existing SSSS backup (no new backup created)       │
+│                                                                  │
+│  5. CLEAR OLD STORAGE                                           │
+│     └── rm -rf /bot/storage/*                                   │
+│                                                                  │
+│  6. DEPLOY UPDATED ORACLE                                       │
+│     └── Deploy new version with SQLite crypto store             │
+│     └── Oracle auto-extracts backup key from SSSS on startup    │
+│                                                                  │
+│  7. START YOUR ORACLE                                           │
+│     └── Oracle restores keys from server backup automatically   │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Key difference from bot migration:** Oracles use `extract-backup-key` (extracts existing backup key from SSSS) instead of `enable` (creates a new backup). The oracle's updated code automatically extracts the backup key from SSSS on every startup using the `MATRIX_RECOVERY_PHRASE`.
 
 ## Docker Usage
 

@@ -70,16 +70,19 @@ function showHelp(): void {
     log('  OLD_DEVICE_ID     Device ID to delete (auto-detected from bot-sdk.json)');
     log('  MIGRATION_PASSWORD Account password for device deletion');
     log('  MIGRATION_CONFIRM  Device ID to confirm deletion (for non-interactive use)');
+    log('  RECOVERY_PHRASE   Oracle recovery phrase for SSSS extraction (oracle-all, extract-backup-key)');
     log('');
     log('Commands:');
-    log('  backup       Create backup of current crypto store');
-    log('  extract      Extract keys from Sled store (requires Rust toolchain)');
-    log('  enable       Enable server backup and generate recovery key');
-    log('  upload       Upload extracted keys to server backup');
-    log('  verify       Verify backup completeness');
-    log('  delete       Delete old device (requires password)');
-    log('  all          Run full migration (enable -> upload -> verify)');
-    log('  generate-key Generate a new recovery key (for new deployments)');
+    log('  backup            Create backup of current crypto store');
+    log('  extract           Extract keys from Sled store (requires Rust toolchain)');
+    log('  enable            Enable server backup and generate recovery key');
+    log('  upload            Upload extracted keys to server backup');
+    log('  verify            Verify backup completeness');
+    log('  delete            Delete old device (requires password)');
+    log('  all               Run full migration (enable -> upload -> verify)');
+    log('  generate-key      Generate a new recovery key (for new deployments)');
+    log('  extract-backup-key Extract backup key from SSSS (for oracles with existing backup)');
+    log('  oracle-all        Run oracle migration (extract-backup-key -> upload -> verify)');
     log('');
     log('Example:');
     log('  HOMESERVER_URL=https://matrix.ixo.world \\');
@@ -155,6 +158,45 @@ async function runCommand(command: string): Promise<void> {
         case 'generate': {
             const { runGenerateKey } = await import('./commands/generate-key');
             await runGenerateKey();
+            break;
+        }
+
+        case 'extract-backup-key': {
+            const { runExtractBackupKey } = await import('./commands/extract-backup-key');
+            await runExtractBackupKey();
+            break;
+        }
+
+        case 'oracle-all': {
+            log('');
+            logHeader('Running Oracle Migration (extract-backup-key -> upload -> verify)');
+            log('');
+
+            log('Step 1/3: Extracting backup key from SSSS...');
+            const { runExtractBackupKey: extractKey } = await import('./commands/extract-backup-key');
+            await extractKey();
+
+            log('');
+            log('Step 2/3: Uploading keys to backup...');
+            const { runUploadKeys: uploadKeys } = await import('./commands/upload-keys');
+            await uploadKeys();
+
+            log('');
+            log('Step 3/3: Verifying backup...');
+            const { runVerifyBackup: verifyBackup } = await import('./commands/verify-backup');
+            await verifyBackup();
+
+            log('');
+            logSuccess('==============================================');
+            logSuccess('Oracle Migration Complete!');
+            logSuccess('==============================================');
+            log('');
+            log('The backup key has been extracted from SSSS and keys uploaded.');
+            log('');
+            log('Next steps:');
+            log('  1. Clear old storage (rm -rf /bot/storage/*)');
+            log('  2. Deploy updated oracle image with sqlite support');
+            log('  3. The oracle will auto-extract the backup key from SSSS on startup');
             break;
         }
 
