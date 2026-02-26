@@ -275,6 +275,23 @@ export async function getAccountData(
 }
 
 /**
+ * Set account data for a user
+ */
+export async function setAccountData(
+    config: MatrixApiConfig,
+    userId: string,
+    type: string,
+    data: unknown
+): Promise<void> {
+    await matrixRequest<{}>(
+        config,
+        'PUT',
+        `/_matrix/client/v3/user/${encodeURIComponent(userId)}/account_data/${encodeURIComponent(type)}`,
+        data
+    );
+}
+
+/**
  * Start a user-interactive auth session for device deletion
  */
 export async function startDeviceDeletionAuth(

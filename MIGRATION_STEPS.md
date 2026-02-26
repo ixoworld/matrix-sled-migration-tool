@@ -298,18 +298,32 @@ This runs: `enable` -> `upload` -> `verify`
 
 ## Oracle Migration (Existing SSSS Backup)
 
-Oracles that already have SSSS (Secret Storage) set up via `MATRIX_RECOVERY_PHRASE` and an existing server-side key backup (created during initial cross-signing setup) use a different flow. Instead of creating a new backup with `enable`, the existing backup key is extracted from SSSS.
+Oracles that already have SSSS (Secret Storage) set up via `MATRIX_RECOVERY_PHRASE` and an existing server-side key backup (created during initial cross-signing setup) use a different flow. Instead of creating a new backup with `enable`, the existing backup key is obtained from SSSS (or stored there if missing).
 
 ### When to Use Oracle Migration
 
 Use the oracle-specific commands when:
 - The oracle has `MATRIX_RECOVERY_PHRASE` configured
 - The oracle has already completed initial setup (cross-signing + key backup created)
-- SSSS account data exists on the server (`m.secret_storage.default_key`, `m.megolm_backup.v1`)
+- SSSS account data exists on the server (`m.secret_storage.default_key`)
 
-### Step A: Extract Backup Key from SSSS
+### Step A: Extract Keys from Sled (with backup key)
 
-Instead of `enable` (Step 3), extract the existing backup key from SSSS:
+Use `--backup-key-output` to also extract the backup decryption key from sled:
+
+```bash
+key-extractor \
+  --sled-path $CRYPTO_STORE_PATH/matrix-sdk-crypto \
+  --output /migration/extracted-keys.json \
+  --backup-key-output /migration/backup-key.json \
+  --verbose
+```
+
+This extracts both the session keys and the backup decryption key from sled's `account` tree.
+
+### Step B: Get Backup Key into SSSS
+
+First, try extracting the backup key directly from SSSS (it may already be there):
 
 ```bash
 HOMESERVER_URL=https://matrix.example.com \
@@ -319,27 +333,36 @@ RECOVERY_PHRASE="your_recovery_phrase" \
 sled-migration-tool extract-backup-key
 ```
 
-**What it does:**
-1. Fetches `m.secret_storage.default_key` to get the SSSS key ID
-2. Fetches `m.secret_storage.key.<keyId>` to get salt, iterations, and MAC
-3. Derives the SSSS master key from the recovery phrase using PBKDF2-SHA512
-4. Verifies the derived key against the stored MAC
-5. Fetches `m.megolm_backup.v1` (the encrypted backup key from SSSS)
-6. Decrypts using AES-CTR + HMAC-SHA256 (HKDF-derived keys)
-7. Verifies the decrypted key matches the server backup's public key
+If this fails with **"No backup key found in SSSS"**, the backup key was never stored in SSSS. This is common when `resetKeyBackup()` created the server backup but didn't store the decryption key in SSSS. Use `store-backup-key-in-ssss` to fix this:
 
-**Output:**
-- `recovery-key.txt` - Recovery key in Base58 format (same format as `enable`)
+```bash
+HOMESERVER_URL=https://matrix.example.com \
+ACCESS_TOKEN=syt_xxx \
+STORAGE_PATH=/path/to/bot/storage \
+RECOVERY_PHRASE="your_recovery_phrase" \
+sled-migration-tool store-backup-key-in-ssss
+```
+
+**What `store-backup-key-in-ssss` does:**
+1. Reads `backup-key.json` (extracted from sled in Step A)
+2. Verifies the key matches the server backup's public key
+3. Derives the SSSS master key from the recovery phrase (PBKDF2-SHA512)
+4. Encrypts the backup key using SSSS (AES-CTR + HMAC-SHA256)
+5. Stores it in `m.megolm_backup.v1` account data on the server
+6. Verifies round-trip (re-extracts and compares)
+
+**Output (same as `extract-backup-key`):**
+- `recovery-key.txt` - Recovery key in Base58 format
 - `backup-private-key.bin` - Raw key bytes
 - `backup-public-key.txt` - Public key for reference
 
-### Step B & C: Upload and Verify
+### Step C & D: Upload and Verify
 
-After extracting the backup key, run `upload` and `verify` as normal (Steps 4-5 above). The `upload` command works with existing server backups — it doesn't require the backup to have been created by the `enable` command.
+After getting the backup key, run `upload` and `verify` as normal (Steps 4-5 above). The `upload` command works with existing server backups — it doesn't require the backup to have been created by the `enable` command.
 
 ### Oracle Combined Command
 
-Run `extract-backup-key` -> `upload` -> `verify` in one command:
+Run `store-backup-key-in-ssss` -> `upload` -> `verify` in one command (requires `backup-key.json` from Step A):
 
 ```bash
 HOMESERVER_URL=https://matrix.example.com \
@@ -651,9 +674,11 @@ The tool will prompt whether to create a new backup version. Options:
 ### "No backup key found in SSSS"
 
 When running `extract-backup-key`:
-- SSSS may not be set up (oracle hasn't completed initial cross-signing setup)
-- The `m.megolm_backup.v1` secret may not be stored in SSSS
-- Run the oracle once with the current code to complete initial setup, then retry
+- The `m.megolm_backup.v1` secret may not be stored in SSSS (common when `resetKeyBackup()` created the backup without storing the key)
+- Use `store-backup-key-in-ssss` to extract the key from sled and store it in SSSS:
+  1. Re-run key extraction with `--backup-key-output backup-key.json`
+  2. Run `store-backup-key-in-ssss` — this reads the key from sled, encrypts it with SSSS, and stores it on the server
+- SSSS may not be set up at all (oracle hasn't completed initial cross-signing setup)
 
 ### "SSSS key verification failed: recovery phrase does not match"
 
@@ -691,7 +716,7 @@ When running `extract-backup-key`:
 | `MIGRATION_CONFIRM` | No | Device ID confirmation for non-interactive deletion |
 | `FORCE_NEW_BACKUP` | No | Skip prompt when existing backup found |
 | `FORCE_BACKUP` | No | Continue backup even if bot appears running |
-| `RECOVERY_PHRASE` | For oracle cmds | Oracle recovery phrase for SSSS extraction (`extract-backup-key`, `oracle-all`) |
+| `RECOVERY_PHRASE` | For oracle cmds | Oracle recovery phrase for SSSS commands (`extract-backup-key`, `store-backup-key-in-ssss`, `oracle-all`) |
 
 ## Files Generated
 
@@ -703,6 +728,7 @@ During migration, these files are created in `MIGRATION_DIR`:
 | `backup-private-key.bin` | Private encryption key | Keep for migration only |
 | `backup-public-key.txt` | Public key reference | Safe to keep |
 | `extracted-keys.json` | Extracted Megolm keys | **DELETE after upload** |
+| `backup-key.json` | Backup decryption key from sled | **DELETE after migration** |
 | `migration-state.json` | Migration progress tracking | Safe to keep |
 | `migration-backup-*/` | Pre-migration backup | Keep until verified |
 

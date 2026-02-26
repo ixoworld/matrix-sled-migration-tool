@@ -141,7 +141,7 @@ function encodeBase64(data: Uint8Array): string {
 /**
  * Encrypt a value using SSSS (for key verification).
  */
-async function encryptAESSecretStorageItem(
+export async function encryptAESSecretStorageItem(
     data: string,
     masterKey: Uint8Array,
     secretName: string,

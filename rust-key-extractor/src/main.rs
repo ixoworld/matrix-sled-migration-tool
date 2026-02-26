@@ -5,6 +5,7 @@
 //! to a Matrix server backup for migration to SQLite storage.
 
 use anyhow::{Context, Result};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use clap::Parser;
 use matrix_sdk_crypto::olm::{ExportedRoomKey, InboundGroupSession, PickledInboundGroupSession};
 use matrix_sdk_crypto::store::CryptoStore;
@@ -77,6 +78,15 @@ struct FailedSessionsOutput {
     sessions: Vec<FailedSession>,
 }
 
+/// Output format for the extracted backup key
+#[derive(Debug, Serialize, Deserialize)]
+struct BackupKeyOutput {
+    /// Base64-encoded backup decryption key (32 bytes)
+    backup_key_base64: String,
+    /// Backup version from the store (if available)
+    backup_version: Option<String>,
+}
+
 /// CLI arguments for the key extractor
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -104,6 +114,10 @@ struct Args {
     /// Output file for failed session details (only used with --skip-errors)
     #[arg(long)]
     failed_output: Option<PathBuf>,
+
+    /// Output file for the backup decryption key (extracted from account tree)
+    #[arg(long)]
+    backup_key_output: Option<PathBuf>,
 }
 
 /// Convert an ExportedRoomKey to our serializable format
@@ -378,6 +392,60 @@ fn organize_keys(keys: Vec<ExportedRoomKey>, failed_count: usize) -> ExtractionO
     }
 }
 
+/// Extract the backup decryption key from the sled account tree
+fn extract_backup_key(
+    sled_path: &PathBuf,
+    passphrase: Option<&str>,
+) -> Result<BackupKeyOutput> {
+    let effective_passphrase = passphrase.unwrap_or("");
+
+    let db = sled::Config::new()
+        .path(sled_path)
+        .open()
+        .context("Failed to open sled database for backup key extraction")?;
+
+    let store_cipher = load_store_cipher(&db, effective_passphrase)?;
+    let store_cipher_ref = store_cipher.as_ref();
+
+    let account_tree = db
+        .open_tree("account")
+        .context("Failed to open account tree")?;
+
+    info!("Account tree has {} entries", account_tree.len());
+
+    // Read recovery key (the backup decryption key)
+    let recovery_key_data = account_tree
+        .get(encode_key("recovery_key_v1"))
+        .context("Failed to read recovery_key_v1")?
+        .context("No recovery_key_v1 found in account tree (backup key not stored in sled)")?;
+
+    // RecoveryKey is #[serde(transparent)] on Box<[u8; 32]>, so it deserializes as Vec<u8>
+    let key_bytes: Vec<u8> = deserialize_value(&recovery_key_data, store_cipher_ref)
+        .context("Failed to deserialize recovery key")?;
+
+    info!("Recovery key extracted: {} bytes", key_bytes.len());
+
+    let backup_key_base64 = BASE64.encode(&key_bytes);
+
+    // Read backup version (optional)
+    let backup_version: Option<String> = account_tree
+        .get(encode_key("backup_version_v1"))
+        .ok()
+        .flatten()
+        .and_then(|data| deserialize_value::<String>(&data, store_cipher_ref).ok());
+
+    if let Some(ref version) = backup_version {
+        info!("Backup version: {}", version);
+    } else {
+        info!("No backup version found in account tree");
+    }
+
+    Ok(BackupKeyOutput {
+        backup_key_base64,
+        backup_version,
+    })
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
@@ -477,6 +545,28 @@ async fn main() -> Result<()> {
         info!("\nKeys per room:");
         for (room_id, keys) in &output.keys_by_room {
             info!("  {}: {} keys", room_id, keys.len());
+        }
+    }
+
+    // Extract backup key if requested
+    if let Some(backup_key_path) = &args.backup_key_output {
+        info!("");
+        info!("=== BACKUP KEY EXTRACTION ===");
+        match extract_backup_key(&args.sled_path, args.passphrase.as_deref()) {
+            Ok(backup_key) => {
+                let json = serde_json::to_string_pretty(&backup_key)
+                    .context("Failed to serialize backup key")?;
+                std::fs::write(backup_key_path, &json)
+                    .context("Failed to write backup key file")?;
+                info!("Backup key extracted to: {:?}", backup_key_path);
+                if let Some(version) = &backup_key.backup_version {
+                    info!("Backup version: {}", version);
+                }
+            }
+            Err(e) => {
+                warn!("Could not extract backup key: {}", e);
+                warn!("This is expected if the bot never enabled key backup");
+            }
         }
     }
 

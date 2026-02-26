@@ -65,7 +65,7 @@ matrix-sled-migration <command>
 | `MIGRATION_PASSWORD` | Account password (non-interactive) | - |
 | `MIGRATION_CONFIRM` | Confirm device deletion (non-interactive) | - |
 | `FORCE_NEW_BACKUP` | Skip prompt when existing backup found | - |
-| `RECOVERY_PHRASE` | Oracle recovery phrase for SSSS extraction (`extract-backup-key`, `oracle-all`) | - |
+| `RECOVERY_PHRASE` | Oracle recovery phrase for SSSS commands (`extract-backup-key`, `store-backup-key-in-ssss`, `oracle-all`) | - |
 
 ## Commands
 
@@ -172,7 +172,7 @@ Oracles that already have SSSS (Secret Storage) set up via `MATRIX_RECOVERY_PHRA
 
 #### Extract Backup Key from SSSS
 
-Extract the existing backup decryption key from Matrix Secret Storage using the oracle's recovery phrase.
+First try extracting the backup key directly from SSSS:
 
 ```bash
 HOMESERVER_URL=https://matrix.example.com \
@@ -182,16 +182,27 @@ RECOVERY_PHRASE="your_recovery_phrase" \
 npx @ixo/matrix-sled-migration extract-backup-key
 ```
 
-**What it does:**
-- Fetches the SSSS key metadata from the server
-- Derives the SSSS master key from the recovery phrase (PBKDF2-SHA512)
-- Decrypts the backup key stored in `m.megolm_backup.v1` account data
-- Verifies the key matches the server backup's public key
-- Saves `recovery-key.txt`, `backup-private-key.bin`, `backup-public-key.txt`
+#### Store Backup Key in SSSS (if extract-backup-key fails)
+
+If `extract-backup-key` fails with "No backup key found in SSSS", the backup key was never stored in SSSS (common when `resetKeyBackup()` created the backup). Extract it from sled and store it in SSSS:
+
+```bash
+# First, extract the backup key from sled (add --backup-key-output to your extract step):
+key-extractor --sled-path $STORAGE_PATH/encrypted/matrix-sdk-crypto \
+  --output extracted-keys.json \
+  --backup-key-output backup-key.json --verbose
+
+# Then store it in SSSS:
+HOMESERVER_URL=https://matrix.example.com \
+ACCESS_TOKEN=syt_xxx \
+STORAGE_PATH=/app/storage \
+RECOVERY_PHRASE="your_recovery_phrase" \
+npx @ixo/matrix-sled-migration store-backup-key-in-ssss
+```
 
 #### Oracle Automated Migration
 
-Run `extract-backup-key` -> `upload` -> `verify` in one command:
+Run `store-backup-key-in-ssss` -> `upload` -> `verify` in one command (requires `backup-key.json` from the extract step):
 
 ```bash
 HOMESERVER_URL=https://matrix.example.com \
@@ -262,30 +273,36 @@ For oracles with SSSS already set up (via `MATRIX_RECOVERY_PHRASE`):
 │  2. BACKUP (optional)                                           │
 │     └── npx @ixo/matrix-sled-migration backup                   │
 │                                                                  │
-│  3. EXTRACT                                                     │
-│     └── npx @ixo/matrix-sled-migration extract                  │
-│     └── Requires: Rust toolchain                                │
-│     └── Output: extracted-keys.json                             │
+│  3. EXTRACT (with --backup-key-output)                          │
+│     └── key-extractor --sled-path ... --output extracted-keys   │
+│         --backup-key-output backup-key.json                     │
+│     └── Output: extracted-keys.json + backup-key.json           │
 │                                                                  │
-│  4. EXTRACT BACKUP KEY + UPLOAD + VERIFY (or run "oracle-all")  │
-│     └── npx @ixo/matrix-sled-migration oracle-all               │
-│     └── Requires: RECOVERY_PHRASE env var                       │
-│     └── Uses existing SSSS backup (no new backup created)       │
+│  4a. TRY extract-backup-key (backup key may already be in SSSS) │
+│     └── npx @ixo/matrix-sled-migration extract-backup-key       │
 │                                                                  │
-│  5. CLEAR OLD STORAGE                                           │
+│  4b. IF 4a FAILS: store-backup-key-in-ssss                     │
+│     └── npx @ixo/matrix-sled-migration store-backup-key-in-ssss │
+│     └── Reads backup-key.json, stores key in SSSS               │
+│                                                                  │
+│  5. UPLOAD + VERIFY                                             │
+│     └── npx @ixo/matrix-sled-migration upload                   │
+│     └── npx @ixo/matrix-sled-migration verify                   │
+│                                                                  │
+│  6. CLEAR OLD STORAGE                                           │
 │     └── rm -rf /bot/storage/*                                   │
 │                                                                  │
-│  6. DEPLOY UPDATED ORACLE                                       │
+│  7. DEPLOY UPDATED ORACLE                                       │
 │     └── Deploy new version with SQLite crypto store             │
 │     └── Oracle auto-extracts backup key from SSSS on startup    │
 │                                                                  │
-│  7. START YOUR ORACLE                                           │
+│  8. START YOUR ORACLE                                           │
 │     └── Oracle restores keys from server backup automatically   │
 │                                                                  │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-**Key difference from bot migration:** Oracles use `extract-backup-key` (extracts existing backup key from SSSS) instead of `enable` (creates a new backup). The oracle's updated code automatically extracts the backup key from SSSS on every startup using the `MATRIX_RECOVERY_PHRASE`.
+**Key difference from bot migration:** Oracles use SSSS instead of `enable`. First try `extract-backup-key` to get the key from SSSS. If the key isn't there (common when `resetKeyBackup()` created the backup without storing it), use `store-backup-key-in-ssss` to extract it from sled and store it in SSSS. The oracle's updated code auto-extracts the backup key from SSSS on every startup using `MATRIX_RECOVERY_PHRASE`.
 
 ## Docker Usage
 
@@ -342,6 +359,7 @@ The `rust-key-extractor` binary can be run directly for more control:
 | `-v, --verbose` | Enable verbose output |
 | `--skip-errors` | **Fault-tolerant mode** - skip corrupted entries |
 | `--failed-output <FILE>` | Output file for failed session details |
+| `--backup-key-output <FILE>` | Extract backup decryption key from sled account tree |
 
 ## Files Generated
 
@@ -351,6 +369,7 @@ The `rust-key-extractor` binary can be run directly for more control:
 | `backup-private-key.bin` | Private key for backup encryption |
 | `backup-public-key.txt` | Public key for reference |
 | `extracted-keys.json` | Keys extracted from Sled |
+| `backup-key.json` | Backup decryption key from sled (when using `--backup-key-output`) |
 | `failed-sessions.json` | Failed sessions (when using `--skip-errors`) |
 | `migration-state.json` | Migration progress tracking |
 

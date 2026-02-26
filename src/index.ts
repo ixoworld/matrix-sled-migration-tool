@@ -82,7 +82,8 @@ function showHelp(): void {
     log('  all               Run full migration (enable -> upload -> verify)');
     log('  generate-key      Generate a new recovery key (for new deployments)');
     log('  extract-backup-key Extract backup key from SSSS (for oracles with existing backup)');
-    log('  oracle-all        Run oracle migration (extract-backup-key -> upload -> verify)');
+    log('  store-backup-key-in-ssss  Store backup key (from sled) into SSSS');
+    log('  oracle-all        Run oracle migration (store-backup-key-in-ssss -> upload -> verify)');
     log('');
     log('Example:');
     log('  HOMESERVER_URL=https://matrix.ixo.world \\');
@@ -167,14 +168,20 @@ async function runCommand(command: string): Promise<void> {
             break;
         }
 
+        case 'store-backup-key-in-ssss': {
+            const { runStoreBackupKeyInSSSS } = await import('./commands/store-backup-key-in-ssss');
+            await runStoreBackupKeyInSSSS();
+            break;
+        }
+
         case 'oracle-all': {
             log('');
-            logHeader('Running Oracle Migration (extract-backup-key -> upload -> verify)');
+            logHeader('Running Oracle Migration (store-backup-key-in-ssss -> upload -> verify)');
             log('');
 
-            log('Step 1/3: Extracting backup key from SSSS...');
-            const { runExtractBackupKey: extractKey } = await import('./commands/extract-backup-key');
-            await extractKey();
+            log('Step 1/3: Storing backup key in SSSS...');
+            const { runStoreBackupKeyInSSSS: storeKey } = await import('./commands/store-backup-key-in-ssss');
+            await storeKey();
 
             log('');
             log('Step 2/3: Uploading keys to backup...');
@@ -191,7 +198,7 @@ async function runCommand(command: string): Promise<void> {
             logSuccess('Oracle Migration Complete!');
             logSuccess('==============================================');
             log('');
-            log('The backup key has been extracted from SSSS and keys uploaded.');
+            log('The backup key has been stored in SSSS and keys uploaded.');
             log('');
             log('Next steps:');
             log('  1. Clear old storage (rm -rf /bot/storage/*)');
